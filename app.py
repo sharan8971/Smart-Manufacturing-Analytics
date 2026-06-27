@@ -162,6 +162,24 @@ with st.sidebar:
     st.title("Manufacturing\nAnalytics")
     st.markdown("---")
 
+    # ── Data Source Selector ──────────────────
+    st.subheader("📂 Data Source")
+    data_source = st.radio("Choose source", ["☁️ MongoDB Atlas", "📄 Upload CSV"])
+
+    uploaded_csv = None
+    if data_source == "📄 Upload CSV":
+        uploaded_csv = st.file_uploader(
+            "Upload your Manufacturing CSV",
+            type=["csv"],
+            help="Upload Manufacturing_Dataset.csv"
+        )
+        if uploaded_csv:
+            st.success(f"✅ {uploaded_csv.name} loaded!")
+        else:
+            st.info("👆 Upload a CSV file to get started")
+
+    st.markdown("---")
+
     page = st.radio("Navigate", [
         "📊 KPI Dashboard",
         "🏭 Plant & Shift Analysis",
@@ -172,36 +190,120 @@ with st.sidebar:
     ])
 
     st.markdown("---")
-    st.caption("Data source: MongoDB Atlas")
+    st.caption(f"Data source: {'CSV Upload' if data_source == '📄 Upload CSV' else 'MongoDB Atlas'}")
     if st.button("🔄 Refresh Data"):
         st.cache_data.clear()
         st.rerun()
 
 # ─────────────────────────────────────────────
-# Connection test
+# Data loading — MongoDB OR CSV
 # ─────────────────────────────────────────────
-try:
-    db = get_db()
-    db.command("ping")
-except Exception as e:
-    st.error(f"❌ Cannot connect to MongoDB Atlas: {e}")
-    st.info("Check your `secrets.toml` — see the Setup Guide below.")
-    st.code("""
-# .streamlit/secrets.toml
-[mongodb]
-uri     = "mongodb+srv://<user>:<password>@<cluster>.mongodb.net/"
-db_name = "manufacturing_db"
-    """)
-    st.stop()
+def load_csv(file) -> pd.DataFrame:
+    """Load and normalise an uploaded CSV file."""
+    df = pd.read_csv(file, parse_dates=["Production_Date"] if "Production_Date" in pd.read_csv(file, nrows=0).columns else [])
+    # Lowercase + snake_case column names so the rest of the app works
+    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    return df
+
+def compute_kpi_from_df(df: pd.DataFrame) -> dict:
+    """Replicate the MongoDB $facet KPI pipeline using pandas."""
+
+    # detect column names flexibly
+    def col(keywords):
+        for k in keywords:
+            match = next((c for c in df.columns if k in c), None)
+            if match:
+                return match
+        return None
+
+    units_col    = col(["units_produced"])
+    defect_col   = col(["defective_units"])
+    quality_col  = col(["quality_score"])
+    oee_col      = col(["oee"])
+    energy_col   = col(["energy"])
+    downtime_col = col(["downtime"])
+    plant_col    = col(["plant_id"])
+    shift_col    = col(["shift"])
+    product_col  = col(["product_type"])
+
+    overall = {
+        "total_records":   len(df),
+        "total_units":     int(df[units_col].sum())    if units_col    else 0,
+        "total_defective": int(df[defect_col].sum())   if defect_col   else 0,
+        "avg_quality":     float(df[quality_col].mean()) if quality_col else 0,
+        "avg_oee":         float(df[oee_col].mean())   if oee_col      else 0,
+        "avg_energy":      float(df[energy_col].mean()) if energy_col  else 0,
+        "avg_downtime":    float(df[downtime_col].mean()) if downtime_col else 0,
+    }
+
+    def group(by_col, metrics):
+        if not by_col or by_col not in df.columns:
+            return []
+        agg = {}
+        for name, src, fn in metrics:
+            if src and src in df.columns:
+                agg[name] = (src, fn)
+        if not agg:
+            return []
+        g = df.groupby(by_col).agg(**{k: v for k, v in agg.items()}).reset_index()
+        g.rename(columns={by_col: "_id"}, inplace=True)
+        return g.to_dict("records")
+
+    by_plant   = group(plant_col,   [("avg_quality","quality_score" if quality_col else None,"mean"),
+                                      ("avg_oee", oee_col,"mean"),
+                                      ("total_units", units_col,"sum"),
+                                      ("avg_defect", defect_col,"mean")])
+    by_shift   = group(shift_col,   [("avg_quality", quality_col,"mean"),
+                                      ("avg_oee", oee_col,"mean"),
+                                      ("total_units", units_col,"sum")])
+    by_product = group(product_col, [("avg_quality", quality_col,"mean"),
+                                      ("total_units", units_col,"sum"),
+                                      ("avg_defect", defect_col,"mean")])
+
+    return {"overall": [overall], "by_plant": by_plant,
+            "by_shift": by_shift, "by_product": by_product}
+
+# ── Decide which path to use ──────────────────
+using_csv = (data_source == "📄 Upload CSV")
+
+if using_csv:
+    if uploaded_csv is None:
+        st.title("🏭 Smart Manufacturing Analytics")
+        st.info("👈 Upload your **Manufacturing_Dataset.csv** in the sidebar to get started.")
+        st.markdown("**Expected columns in your CSV:**")
+        st.code("Production_ID, Plant_ID, Machine_ID, Operator_ID, Product_Type, Shift,\n"
+                "Production_Date, Units_Produced, Defective_Units, Quality_Score,\n"
+                "Energy_Consumption_kWh, Downtime_Minutes, ...")
+        st.stop()
+    # Load CSV once and cache in session state
+    if "csv_df" not in st.session_state or st.session_state.get("csv_name") != uploaded_csv.name:
+        st.session_state.csv_df  = load_csv(uploaded_csv)
+        st.session_state.csv_name = uploaded_csv.name
+    csv_df = st.session_state.csv_df
+else:
+    # MongoDB path — test connection
+    try:
+        db = get_db()
+        db.command("ping")
+    except Exception as e:
+        st.error(f"❌ Cannot connect to MongoDB Atlas: {e}")
+        st.info("Switch to **📄 Upload CSV** in the sidebar to use the dashboard without MongoDB, "
+                "or fix your secrets (see below).")
+        st.code(
+            '[mongodb]\n'
+            'uri     = "mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority"\n'
+            'db_name = "manufacturing_db"'
+        )
+        st.stop()
 
 # ─────────────────────────────────────────────
 # PAGE 1 — KPI Dashboard
 # ─────────────────────────────────────────────
 if page == "📊 KPI Dashboard":
     st.title("🏭 Smart Manufacturing — KPI Dashboard")
-    st.caption(f"Live data from MongoDB Atlas · Refreshed: {datetime.now().strftime('%H:%M:%S')}")
+    st.caption(f"{'CSV Upload' if using_csv else 'Live MongoDB Atlas'} · Refreshed: {datetime.now().strftime('%H:%M:%S')}")
 
-    data = kpi_summary()
+    data = compute_kpi_from_df(csv_df) if using_csv else kpi_summary()
     ov   = data.get("overall", [{}])[0]
 
     # KPI Metric Cards
@@ -249,7 +351,7 @@ if page == "📊 KPI Dashboard":
 elif page == "🏭 Plant & Shift Analysis":
     st.title("🏭 Plant & Shift Analysis")
 
-    data = kpi_summary()
+    data = compute_kpi_from_df(csv_df) if using_csv else kpi_summary()
 
     col1, col2 = st.columns(2)
 
@@ -311,7 +413,7 @@ elif page == "🏭 Plant & Shift Analysis":
 elif page == "🔧 Machine & OEE":
     st.title("🔧 Machine Performance & OEE")
 
-    df = load_all_records()
+    df = csv_df.copy() if using_csv else load_all_records()
 
     # Detect column name variants
     oee_col      = next((c for c in df.columns if "oee" in c.lower()), None)
@@ -364,7 +466,31 @@ elif page == "👷 Operator Leaderboard":
     st.title("👷 Operator Performance Leaderboard")
 
     n = st.slider("Show top N operators", 5, 50, 10)
-    ops = top_operators(n)
+
+    if using_csv:
+        df = csv_df.copy()
+        op_col  = next((c for c in df.columns if "operator" in c), None)
+        q_col   = next((c for c in df.columns if "quality_score" in c), None)
+        oee_col = next((c for c in df.columns if "oee" in c), None)
+        def_col = next((c for c in df.columns if "defective" in c), None)
+        u_col   = next((c for c in df.columns if "units_produced" in c), None)
+        if op_col:
+            agg = {k: v for k, v in {
+                "avg_quality": (q_col, "mean") if q_col else None,
+                "avg_oee":     (oee_col, "mean") if oee_col else None,
+                "avg_defect":  (def_col, "mean") if def_col else None,
+                "total_units": (u_col, "sum") if u_col else None,
+                "records":     (op_col, "count"),
+            }.items() if v}
+            ops_raw = df.groupby(op_col).agg(**agg).reset_index()\
+                        .sort_values("avg_quality" if "avg_quality" in agg else "records", ascending=False)\
+                        .head(n)
+            ops_raw.rename(columns={op_col: "_id"}, inplace=True)
+            ops = ops_raw.to_dict("records")
+        else:
+            ops = []
+    else:
+        ops = top_operators(n)
 
     if ops:
         ops_df = pd.DataFrame(ops).rename(columns={
@@ -398,36 +524,55 @@ elif page == "👷 Operator Leaderboard":
 elif page == "⚡ Energy & Downtime":
     st.title("⚡ Energy Consumption & Downtime Trends")
 
-    trend = energy_trend()
-    if trend:
-        trend_df = pd.DataFrame([{
-            "Week": f"{d['_id']['year']}-W{d['_id'].get('week', 0):02d}",
-            "Avg Energy (kWh)": round(d["avg_energy"], 2),
-            "Avg OEE %": round(d["avg_oee"], 1),
-            "Records": d["count"]
-        } for d in trend])
+    if using_csv:
+        df = csv_df.copy()
+        date_col   = next((c for c in df.columns if "date" in c), None)
+        energy_col = next((c for c in df.columns if "energy" in c), None)
+        oee_col    = next((c for c in df.columns if "oee" in c), None)
+        if date_col:
+            df[date_col] = pd.to_datetime(df[date_col])
+            df["week"] = df[date_col].dt.strftime("%Y-W%V")
+            grp_cols = {"Records": (date_col, "count")}
+            if energy_col: grp_cols["Avg Energy (kWh)"] = (energy_col, "mean")
+            if oee_col:    grp_cols["Avg OEE %"]        = (oee_col,    "mean")
+            trend_df = df.groupby("week").agg(**grp_cols).reset_index().rename(columns={"week": "Week"})
+            if "Avg Energy (kWh)" in trend_df:
+                fig = px.line(trend_df, x="Week", y="Avg Energy (kWh)", markers=True,
+                              title="Weekly Avg Energy Consumption (kWh)")
+                st.plotly_chart(fig, use_container_width=True)
+            if "Avg OEE %" in trend_df:
+                fig2 = px.area(trend_df, x="Week", y="Avg OEE %",
+                               title="Weekly OEE % Trend", color_discrete_sequence=["#1976d2"])
+                st.plotly_chart(fig2, use_container_width=True)
+    else:
+        trend = energy_trend()
+        if trend:
+            trend_df = pd.DataFrame([{
+                "Week": f"{d['_id']['year']}-W{d['_id'].get('week', 0):02d}",
+                "Avg Energy (kWh)": round(d["avg_energy"], 2),
+                "Avg OEE %": round(d["avg_oee"], 1),
+                "Records": d["count"]
+            } for d in trend])
+            fig = px.line(trend_df, x="Week", y="Avg Energy (kWh)", markers=True,
+                          title="Weekly Avg Energy Consumption (kWh)")
+            st.plotly_chart(fig, use_container_width=True)
+            fig2 = px.area(trend_df, x="Week", y="Avg OEE %",
+                           title="Weekly OEE % Trend", color_discrete_sequence=["#1976d2"])
+            st.plotly_chart(fig2, use_container_width=True)
 
-        fig = px.line(trend_df, x="Week", y="Avg Energy (kWh)", markers=True,
-                      title="Weekly Avg Energy Consumption (kWh)")
-        st.plotly_chart(fig, use_container_width=True)
-
-        fig2 = px.area(trend_df, x="Week", y="Avg OEE %",
-                       title="Weekly OEE % Trend", color_discrete_sequence=["#1976d2"])
-        st.plotly_chart(fig2, use_container_width=True)
-
-    # Raw data distribution
-    df = load_all_records()
-    energy_col   = next((c for c in df.columns if "energy" in c.lower()), None)
-    downtime_col = next((c for c in df.columns if "downtime" in c.lower()), None)
+    # Histograms — same for both sources
+    df2 = csv_df.copy() if using_csv else load_all_records()
+    energy_col   = next((c for c in df2.columns if "energy" in c.lower()), None)
+    downtime_col = next((c for c in df2.columns if "downtime" in c.lower()), None)
 
     col1, col2 = st.columns(2)
     if energy_col:
-        fig3 = px.histogram(df, x=energy_col, nbins=30,
+        fig3 = px.histogram(df2, x=energy_col, nbins=30,
                             title="Energy Consumption Distribution",
                             labels={energy_col: "kWh"}, color_discrete_sequence=["#f57c00"])
         col1.plotly_chart(fig3, use_container_width=True)
     if downtime_col:
-        fig4 = px.histogram(df, x=downtime_col, nbins=30,
+        fig4 = px.histogram(df2, x=downtime_col, nbins=30,
                             title="Downtime Distribution",
                             labels={downtime_col: "Minutes"}, color_discrete_sequence=["#d32f2f"])
         col2.plotly_chart(fig4, use_container_width=True)
@@ -438,7 +583,7 @@ elif page == "⚡ Energy & Downtime":
 elif page == "🔍 Data Explorer":
     st.title("🔍 Data Explorer")
 
-    df = load_all_records()
+    df = csv_df.copy() if using_csv else load_all_records()
     st.caption(f"{len(df):,} total records loaded from MongoDB")
 
     col1, col2, col3 = st.columns(3)
