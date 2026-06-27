@@ -164,7 +164,7 @@ with st.sidebar:
 
     # ── Data Source Selector ──────────────────
     st.subheader("📂 Data Source")
-    data_source = st.radio("Choose source", ["☁️ MongoDB Atlas", "📄 Upload CSV"])
+    data_source = st.radio("Choose source", ["📄 Upload CSV", "☁️ MongoDB Atlas"])
 
     uploaded_csv = None
     if data_source == "📄 Upload CSV":
@@ -176,7 +176,7 @@ with st.sidebar:
         if uploaded_csv:
             st.success(f"✅ {uploaded_csv.name} loaded!")
         else:
-            st.info("👆 Upload a CSV file to get started")
+            st.info("👆 Upload your CSV file here")
 
     st.markdown("---")
 
@@ -267,33 +267,47 @@ def compute_kpi_from_df(df: pd.DataFrame) -> dict:
 using_csv = (data_source == "📄 Upload CSV")
 
 if using_csv:
+    # ── CSV path — never touches MongoDB ─────
     if uploaded_csv is None:
         st.title("🏭 Smart Manufacturing Analytics")
-        st.info("👈 Upload your **Manufacturing_Dataset.csv** in the sidebar to get started.")
-        st.markdown("**Expected columns in your CSV:**")
+        st.info("👈 Upload your **Manufacturing_Dataset.csv** using the sidebar button to get started.")
+        st.markdown("**Expected columns:**")
         st.code("Production_ID, Plant_ID, Machine_ID, Operator_ID, Product_Type, Shift,\n"
                 "Production_Date, Units_Produced, Defective_Units, Quality_Score,\n"
                 "Energy_Consumption_kWh, Downtime_Minutes, ...")
         st.stop()
-    # Load CSV once and cache in session state
+    # Load CSV once and keep in session state so re-runs are instant
     if "csv_df" not in st.session_state or st.session_state.get("csv_name") != uploaded_csv.name:
-        st.session_state.csv_df  = load_csv(uploaded_csv)
+        st.session_state.csv_df   = load_csv(uploaded_csv)
         st.session_state.csv_name = uploaded_csv.name
     csv_df = st.session_state.csv_df
+
 else:
-    # MongoDB path — test connection
+    # ── MongoDB path — only reached when user explicitly picks it ──
+    mongo_secrets_ok = ("mongodb" in st.secrets)
+    if not mongo_secrets_ok:
+        st.error("❌ MongoDB secrets not configured.")
+        st.markdown("""
+**To use MongoDB Atlas**, add your credentials in Streamlit Cloud:
+
+1. Go to [share.streamlit.io](https://share.streamlit.io) → your app → **⋮ Settings → Secrets**
+2. Paste and save:
+```toml
+[mongodb]
+uri     = "mongodb+srv://USERNAME:PASSWORD@cluster0.XXXXX.mongodb.net/?retryWrites=true&w=majority"
+db_name = "manufacturing_db"
+```
+
+**Or switch to 📄 Upload CSV** in the sidebar — no secrets needed.
+""")
+        st.stop()
+
     try:
         db = get_db()
         db.command("ping")
     except Exception as e:
-        st.error(f"❌ Cannot connect to MongoDB Atlas: {e}")
-        st.info("Switch to **📄 Upload CSV** in the sidebar to use the dashboard without MongoDB, "
-                "or fix your secrets (see below).")
-        st.code(
-            '[mongodb]\n'
-            'uri     = "mongodb+srv://USER:PASSWORD@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority"\n'
-            'db_name = "manufacturing_db"'
-        )
+        st.error(f"❌ MongoDB connection failed: {e}")
+        st.info("👈 Switch to **📄 Upload CSV** in the sidebar to use the dashboard right now.")
         st.stop()
 
 # ─────────────────────────────────────────────
