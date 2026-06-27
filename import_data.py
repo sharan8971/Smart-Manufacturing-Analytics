@@ -18,7 +18,8 @@ import os
 # ─────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────
-MONGO_URI = "mongodb://localhost:27017/"
+MONGO_URI = "mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/smart_manufacturing"
+#"mongodb://localhost:27017/"
 DB_NAME   = "manufacturing_db"
 COLLECTION = "production_records"
 CSV_PATH  = os.path.join(os.path.dirname(__file__), "../data/Manufacturing_Dataset_1500Rows.csv")
@@ -33,7 +34,7 @@ from pymongo import MongoClient, ASCENDING, DESCENDING
 
 # CORRECT — reads from Streamlit Secrets
 client = MongoClient(st.secrets["MONGO_URI"])
-db = client["your_database_name"]
+db = client["smart_manufacturing"]
 try:
     client.admin.command("ping")
     print("✅ Connected to MongoDB successfully")
