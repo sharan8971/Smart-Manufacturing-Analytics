@@ -27,8 +27,13 @@ CSV_PATH  = os.path.join(os.path.dirname(__file__), "../data/Manufacturing_Datas
 # Connect to MongoDB
 # ─────────────────────────────────────────────
 print("🔗 Connecting to MongoDB...")
-client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+#client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+import streamlit as st
+from pymongo import MongoClient, ASCENDING, DESCENDING
 
+# CORRECT — reads from Streamlit Secrets
+client = MongoClient(st.secrets["MONGO_URI"])
+db = client["your_database_name"]
 try:
     client.admin.command("ping")
     print("✅ Connected to MongoDB successfully")
